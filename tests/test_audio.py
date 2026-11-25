@@ -123,16 +123,23 @@ def test_concurrent_keys_never_get_stuck(monkeypatch):
 
     t = threading.Thread(target=audio_thread)
     t.start()
+    # Roda até o fluxo ter dormido e acordado várias vezes. Não depende da precisão
+    # do sleep, que no Windows é de milissegundos.
+    deadline = time.monotonic() + 20
+    i = 0
     try:
-        for i in range(400):
+        while stream.starts < 25 and time.monotonic() < deadline:
             mixer.play(np.ones(4, dtype=np.float32))
             time.sleep(0.0001 * (i % 7))
             with stream.cb_lock:
                 assert stream.active or not mixer._voices, f"tecla presa na iteração {i}"
+            if i % 5 == 4:   # pausa maior: dá tempo do áudio dormir
+                time.sleep(0.005)
+            i += 1
     finally:
         stop.set()
         t.join()
-    assert stream.starts > 10, "o teste não exercitou o dormir/acordar"
+    assert stream.starts >= 25, f"o fluxo só religou {stream.starts} vezes"
 
 
 def test_real_stream_sleeps_and_wakes(monkeypatch):

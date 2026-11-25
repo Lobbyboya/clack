@@ -77,7 +77,9 @@ Categories=Utility;
 Keywords=teclado;som;keyboard;sound;
 StartupWMClass=dev.renan.ClackControl
 DESKTOP
-command -v update-desktop-database >/dev/null && update-desktop-database "$APPS_DIR" 2>/dev/null || true
+if command -v update-desktop-database >/dev/null; then
+    update-desktop-database "$APPS_DIR" 2>/dev/null || true
+fi
 if ! /usr/bin/env python3 -c 'import gi; gi.require_version("Gtk", "4.0"); gi.require_version("Adw", "1")' 2>/dev/null; then
     warn "o painel gráfico precisa de GTK4 + libadwaita para Python: $(hint_pkg 'python-gobject gtk4 libadwaita' 'python3-gi gir1.2-adw-1' 'python3-gobject libadwaita')"
 fi

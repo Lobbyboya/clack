@@ -13,6 +13,7 @@ permissions:
 
 env:
   PYTHON_VERSION: "3.12"
+  PYTHONUTF8: "1"  # acentos legíveis nos logs do Windows
 
 jobs:
   linux:
