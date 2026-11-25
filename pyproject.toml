@@ -1,0 +1,11 @@
+# Configuração das ferramentas de desenvolvimento. A versão do app fica em clack/__init__.py.
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "SIM", "I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,4 @@
+*.sh text eol=lf
+bin/clack text eol=lf
+*.wav binary
+*.png binary

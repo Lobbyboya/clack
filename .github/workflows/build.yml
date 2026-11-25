@@ -1,0 +1,222 @@
+# Testa o Clack nos três sistemas, gera os pacotes e, numa tag v*, publica a release.
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  linux:
+    name: Linux (testes + pacote)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Dependências do sistema (PortAudio, Qt offscreen)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libportaudio2 libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3 shellcheck
+
+      - name: Dependências Python
+        run: pip install -r requirements-linux.txt PySide6-Essentials pytest ruff
+
+      - name: Lint
+        run: |
+          ruff check .
+          shellcheck install.sh uninstall.sh bin/clack tools/*.sh
+
+      - name: Testes
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: pytest -v
+
+      - name: Confere a versão da tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' clack/__init__.py)"
+          test "v$version" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} != versão $version"; exit 1; }
+
+      - name: Pacote Linux
+        run: tools/build_linux_release.sh
+
+      - name: Testa o install.sh num usuário limpo
+        run: |
+          mkdir -p /tmp/teste && tar -xzf dist/clack-*-linux.tar.gz -C /tmp/teste
+          cd /tmp/teste/clack-*-linux
+          HOME=/tmp/casa ./install.sh --no-service
+          test -x /tmp/casa/.local/bin/clack
+          /tmp/casa/.local/bin/clack --help
+          grep -q 'gui/clack_gui.py' /tmp/casa/.local/share/applications/dev.renan.ClackControl.desktop
+          HOME=/tmp/casa /tmp/casa/.local/share/clack/uninstall.sh
+          test ! -e /tmp/casa/.local/share/clack
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: clack-linux
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  desktop:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            label: Windows x64
+            artifact: clack-windows-x64
+          - os: macos-15
+            label: macOS Apple Silicon
+            artifact: clack-macos-arm64
+            arch: arm64
+          - os: macos-15-intel
+            label: macOS Intel
+            artifact: clack-macos-intel
+            arch: intel
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Dependências Python
+        run: pip install -r requirements-desktop.txt pytest pyinstaller
+
+      - name: Testes
+        env:
+          CLACK_SELFTEST_INJECT: "1"
+        run: pytest -v
+
+      - name: Versão
+        id: version
+        shell: bash
+        run: echo "value=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' clack/__init__.py)" >> "$GITHUB_OUTPUT"
+
+      - name: PyInstaller
+        run: pyinstaller desktop/clack.spec --noconfirm
+
+      # ---------------- Windows ----------------
+      - name: Autoteste do executável
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CLACK_SELFTEST_INJECT: "1"
+        run: |
+          $p = Start-Process -FilePath dist\Clack\Clack.exe -ArgumentList '--selftest', "$PWD\selftest-exe.json" -Wait -PassThru
+          Get-Content selftest-exe.json
+          if ($p.ExitCode -ne 0) { throw "autoteste falhou ($($p.ExitCode))" }
+
+      - name: Instalador (Inno Setup) e zip portátil
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+          & $iscc /Qp "/DAppVersion=${{ steps.version.outputs.value }}" desktop\windows-installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC falhou" }
+          Compress-Archive -Path dist\Clack -DestinationPath "dist\Clack-${{ steps.version.outputs.value }}-windows-x64-portable.zip"
+
+      - name: Testa instalar, rodar e desinstalar
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CLACK_SELFTEST_INJECT: "1"
+        run: |
+          $setup = Get-ChildItem dist\*-setup.exe | Select-Object -First 1
+          Start-Process $setup.FullName -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
+          $exe = "$env:LOCALAPPDATA\Programs\Clack\Clack.exe"
+          if (-not (Test-Path $exe)) { throw "Clack.exe não foi instalado em $exe" }
+          if (-not (Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Clack.lnk")) { throw "sem atalho no Menu Iniciar" }
+          $p = Start-Process $exe -ArgumentList '--selftest', "$PWD\selftest-installed.json" -Wait -PassThru
+          Get-Content selftest-installed.json
+          if ($p.ExitCode -ne 0) { throw "autoteste do app instalado falhou" }
+          Start-Process "$env:LOCALAPPDATA\Programs\Clack\unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES' -Wait
+          Start-Sleep -Seconds 3
+          if (Test-Path $exe) { throw "desinstalação deixou o Clack.exe" }
+
+      # ---------------- macOS ----------------
+      - name: Assinatura ad-hoc e verificação
+        if: runner.os == 'macOS'
+        run: |
+          codesign --force --deep --sign - dist/Clack.app
+          codesign --verify --deep --strict --verbose=2 dist/Clack.app
+          plutil -p dist/Clack.app/Contents/Info.plist
+
+      - name: Autoteste do app
+        if: runner.os == 'macOS'
+        run: |
+          dist/Clack.app/Contents/MacOS/Clack --selftest "$PWD/selftest-exe.json" || { cat selftest-exe.json; exit 1; }
+          cat selftest-exe.json
+
+      - name: Imagem de disco (.dmg)
+        if: runner.os == 'macOS'
+        run: |
+          dmg="dist/Clack-${{ steps.version.outputs.value }}-macos-${{ matrix.arch }}.dmg"
+          mkdir -p dmg && cp -R dist/Clack.app dmg/ && ln -s /Applications dmg/Applications
+          hdiutil create -volname Clack -srcfolder dmg -ov -format UDZO "$dmg"
+          mnt="$(mktemp -d)"
+          hdiutil attach "$dmg" -nobrowse -mountpoint "$mnt"
+          "$mnt/Clack.app/Contents/MacOS/Clack" --selftest "$PWD/selftest-installed.json" || { cat selftest-installed.json; exit 1; }
+          cat selftest-installed.json
+          hdiutil detach "$mnt"
+
+      - name: Guarda capturas e relatórios
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}-selftest
+          path: |
+            selftest-*.json
+            selftest-*.png
+          if-no-files-found: ignore
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            dist/*.zip
+            dist/*-setup.exe
+            dist/*.dmg
+          if-no-files-found: error
+
+  release:
+    name: Publica a release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, desktop]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          pattern: clack-*
+          merge-multiple: false
+
+      - name: Cria a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mapfile -t files < <(find artifacts -path '*-selftest*' -prune -o -type f \
+            \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.exe' -o -name '*.dmg' \) -print | sort)
+          printf '%s\n' "${files[@]}"
+          test "${#files[@]}" -eq 5 || { echo "esperava 5 arquivos"; exit 1; }
+          gh release create "${GITHUB_REF_NAME}" "${files[@]}" \
+            --title "Clack ${GITHUB_REF_NAME}" --notes-file .github/RELEASE_NOTES.md
