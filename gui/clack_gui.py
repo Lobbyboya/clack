@@ -196,8 +196,9 @@ class Window(Adw.ApplicationWindow):
             col.append(c)
         col.append(self.build_service())
 
-        self.refresh()
-        GLib.timeout_add(POLL_MS, self.refresh)
+        self.poll_id = 0
+        self.connect("notify::is-active", self.on_focus)
+        self.refresh(check_autostart=True)
 
     # --- construção ------------------------------------------------------------
     def build_hero(self):
@@ -297,7 +298,24 @@ class Window(Adw.ApplicationWindow):
         return box
 
     # --- leitura do estado -------------------------------------------------------
-    def refresh(self) -> bool:
+    def on_focus(self, *_):
+        """Só consulta o daemon com a janela em foco; ao ganhar o foco, atualiza na hora."""
+        if self.is_active() and not self.poll_id:
+            self.refresh()
+            self.poll_id = GLib.timeout_add(POLL_MS, self.poll)
+        elif not self.is_active() and self.poll_id:
+            GLib.source_remove(self.poll_id)
+            self.poll_id = 0
+
+    def poll(self) -> bool:
+        self.refresh()
+        return True  # continua no próximo intervalo
+
+    def refresh_once(self, check_autostart: bool = False) -> bool:
+        self.refresh(check_autostart)
+        return False  # roda uma vez só
+
+    def refresh(self, check_autostart: bool = False):
         state = send("status")
         running = bool(state and state.get("ok"))
         self.updating = True
@@ -329,11 +347,11 @@ class Window(Adw.ApplicationWindow):
             self.svc_button.set_label("Parar" if running else "Iniciar")
             self.svc_button.remove_css_class("go" if running else "stop")
             self.svc_button.add_css_class("stop" if running else "go")
-            self.autostart.set_active(systemctl("is-enabled").stdout.strip() == "enabled")
+            if check_autostart:  # é um processo novo: só quando pode ter mudado
+                self.autostart.set_active(systemctl("is-enabled").stdout.strip() == "enabled")
             self.show_keyboards(state.get("teclados", []) if running else None)
         finally:
             self.updating = False
-        return True
 
     def show_keyboards(self, names):
         if names == self.last_keyboards:
@@ -371,7 +389,7 @@ class Window(Adw.ApplicationWindow):
         elif not reply.get("ok"):
             self.toast(f"Erro: {reply.get('error')}")
         else:
-            GLib.idle_add(lambda: self.refresh() and False)
+            GLib.idle_add(self.refresh_once)
 
     def on_enabled(self, button):
         if not self.updating:
@@ -412,7 +430,7 @@ class Window(Adw.ApplicationWindow):
     def run_systemctl(self, verb, ok_msg):
         res = systemctl(verb)
         self.toast(ok_msg if res.returncode == 0 else f"systemctl {verb} falhou: {res.stderr.strip()}")
-        GLib.timeout_add(600, lambda: self.refresh() and False)
+        GLib.timeout_add(600, self.refresh_once, True)
 
     def toast(self, msg):
         self.toasts.add_toast(Adw.Toast(title=GLib.markup_escape_text(msg), timeout=2))

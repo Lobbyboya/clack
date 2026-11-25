@@ -1,10 +1,13 @@
 """Mixer de baixa latência: soma os sons ativos dentro do callback do PortAudio.
 
-Para não gastar CPU à toa, o fluxo de áudio se desliga depois de alguns segundos
-de silêncio e religa na próxima tecla (religar leva poucos milissegundos).
+Economia de bateria (medida no Linux com PipeWire, digitação simulada):
+- Bloco de 512 amostras: metade do CPU do bloco de 128, com só ~3 ms a mais de atraso.
+- O fluxo de áudio se desliga após IDLE_SECONDS de silêncio. Parado, o Clack não
+  gasta CPU nenhum; a primeira tecla depois da pausa sai ~20 ms mais tarde.
 """
 
 import random
+import sys
 import threading
 
 import numpy as np
@@ -13,7 +16,19 @@ import sounddevice as sd
 from .packs import RATE
 
 MAX_VOICES = 32
-IDLE_SECONDS = 3.0
+BLOCKSIZE = 512
+IDLE_SECONDS = 1.5
+
+
+def output_options() -> dict:
+    """No Windows, prefere o WASAPI: o MME (padrão do PortAudio) tem dezenas de ms de atraso."""
+    if sys.platform != "win32":
+        return {}
+    for api in sd.query_hostapis():
+        if "WASAPI" in api["name"] and api["default_output_device"] >= 0:
+            return {"device": api["default_output_device"],
+                    "extra_settings": sd.WasapiSettings(auto_convert=True)}
+    return {}
 
 
 class Mixer:
@@ -24,8 +39,12 @@ class Mixer:
         self._restart_lock = threading.Lock()  # serializa stop/start do fluxo
         self._idle = True                      # fluxo parado ou parando
         self._silent_frames = 0
-        self._stream = stream_factory(samplerate=RATE, channels=1, dtype="float32",
-                                      blocksize=128, latency="low", callback=self._callback)
+        base = {"samplerate": RATE, "channels": 1, "dtype": "float32", "blocksize": BLOCKSIZE,
+                "latency": "low", "callback": self._callback}
+        try:
+            self._stream = stream_factory(**base, **output_options())
+        except sd.PortAudioError:
+            self._stream = stream_factory(**base)  # volta para o dispositivo padrão
 
     def start(self):
         """Abre o áudio (valida o dispositivo); ele dorme sozinho se ficar em silêncio."""

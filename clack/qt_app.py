@@ -457,9 +457,9 @@ class MainWindow(QWidget):
         col.addStretch(1)
 
         self.refresh()
+        # Atualiza o status só com a janela à vista: na bandeja, nada acorda a CPU.
         self.timer = QTimer(self, interval=1500)
         self.timer.timeout.connect(self.refresh_status)
-        self.timer.start()
 
     # --- construção --------------------------------------------------------------
     def build_hero(self):
@@ -671,6 +671,15 @@ class MainWindow(QWidget):
     def quit_app(self):
         self.quitting = True
         QApplication.instance().quit()
+
+    def showEvent(self, e):
+        self.refresh_status()
+        self.timer.start()
+        super().showEvent(e)
+
+    def hideEvent(self, e):
+        self.timer.stop()
+        super().hideEvent(e)
 
     def closeEvent(self, e):
         if self.quitting or self.tray is None or not QSystemTrayIcon.isSystemTrayAvailable():

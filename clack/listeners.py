@@ -1,7 +1,8 @@
 """Escuta o teclado do sistema inteiro e avisa cada tecla como código do evdev.
 
 Cada sistema tem um backend:
-  - Linux: lê /dev/input pelo evdev (funciona no Wayland; exige o grupo 'input').
+  - Linux: lê /dev/input pelo evdev (funciona no Wayland; exige o grupo 'input'),
+    em linux_input.py.
   - Windows: gancho WH_KEYBOARD_LL (via pynput), lendo o scancode físico.
   - macOS: event tap só de escuta do Quartz (exige "Monitoramento de Entrada").
 
@@ -200,83 +201,10 @@ class MacListener(BaseListener):
             self._loop = None
 
 
-# --- Linux -------------------------------------------------------------------------
-class LinuxListener(BaseListener):
-    RESCAN_SECONDS = 2.0
-
-    def __init__(self, callback: KeyCallback):
-        super().__init__(callback)
-        self._devices = {}
-        self._stop = threading.Event()
-        self._lock = threading.Lock()
-
-    def keyboards(self) -> list[str]:
-        with self._lock:
-            return [d.name for d in self._devices.values()]
-
-    def _rescan(self, sel):
-        import selectors
-
-        import evdev
-        from evdev import ecodes
-        for path in evdev.list_devices():
-            if path in self._devices:
-                continue
-            try:
-                dev = evdev.InputDevice(path)
-            except OSError:
-                continue
-            keys = dev.capabilities().get(ecodes.EV_KEY, [])
-            if ecodes.KEY_A in keys and ecodes.KEY_SPACE in keys:
-                with self._lock:
-                    self._devices[path] = dev
-                sel.register(dev, selectors.EVENT_READ)
-            else:
-                dev.close()
-
-    def _run(self):
-        import selectors
-        import time
-
-        from evdev import ecodes
-        sel = selectors.DefaultSelector()
-        last = 0.0
-        while not self._stop.is_set():
-            if time.monotonic() - last >= self.RESCAN_SECONDS:
-                self._rescan(sel)
-                last = time.monotonic()
-                if not self._devices:
-                    self.status = NO_PERMISSION
-                    self.detail = "nenhum teclado legível (grupo 'input'?)"
-                else:
-                    self.status, self.detail = OK, ""
-            if not self._devices:
-                time.sleep(0.5)
-                continue
-            for key, _ in sel.select(timeout=0.5):
-                dev = key.fileobj
-                try:
-                    events = list(dev.read())
-                except OSError:
-                    sel.unregister(dev)
-                    with self._lock:
-                        self._devices.pop(dev.path, None)
-                    continue
-                for ev in events:
-                    if ev.type == ecodes.EV_KEY and ev.value in (0, 1):
-                        self.emit(ev.code, ev.value == 1)
-
-    def start(self):
-        self._thread = threading.Thread(target=self._run, name="clack-evdev", daemon=True)
-        self._thread.start()
-
-    def stop(self):
-        self._stop.set()
-
-
 def create(callback: KeyCallback) -> BaseListener:
     if sys.platform == "win32":
         return WindowsListener(callback)
     if sys.platform == "darwin":
         return MacListener(callback)
+    from .linux_input import LinuxListener
     return LinuxListener(callback)

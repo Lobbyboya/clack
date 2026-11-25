@@ -74,6 +74,20 @@ Para desinstalar, rode `~/.local/share/clack/uninstall.sh`. Suas preferências c
 
 O Clack só olha **qual tecla física** foi apertada, para escolher o som. Ele não guarda o que você digita, não grava nada em arquivo e não usa a internet.
 
+## Bateria
+
+O Clack foi ajustado para notebook. Medido no Linux com PipeWire:
+
+| Situação | CPU (Clack + servidor de áudio) | Vezes que acorda a CPU |
+|---|---|---|
+| Parado (sem digitar) | 0% | 0 por segundo |
+| Digitando sem parar | ~5% | ~200 por segundo |
+
+O que faz isso funcionar:
+- **O áudio dorme quando não há som.** Depois de 1,5 s sem tecla, o fluxo de áudio fecha. Por isso a primeira tecla depois de uma pausa sai uns 20 ms mais tarde.
+- **O áudio trabalha em blocos de 512 amostras.** Isso gasta metade da CPU do bloco de 128, com só ~3 ms a mais de atraso.
+- **Nada acorda periodicamente.** No Linux, o kernel avisa pelo `inotify` quando um teclado é ligado ou desligado. No Windows e no macOS, o gancho do sistema só chama o Clack quando há tecla. A janela só se atualiza quando está visível.
+
 ## Como funciona
 
 | | Linux | Windows | macOS |

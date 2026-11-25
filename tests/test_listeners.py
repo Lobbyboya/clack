@@ -7,13 +7,21 @@ from clack import listeners
 from clack.keymap import KEY, LLKHF_EXTENDED
 
 
+class Quiet(listeners.BaseListener):
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
+
+
 def collect(cls):
     got = []
     return cls(lambda code, down: got.append((code, down))), got
 
 
 def test_autorepeat_is_ignored():
-    lst, got = collect(listeners.LinuxListener)
+    lst, got = collect(Quiet)
     for down in (True, True, True, False, True, False):
         lst.emit(30, down)
     assert got == [(30, True), (30, False), (30, True), (30, False)]
@@ -23,7 +31,7 @@ def test_callback_error_does_not_propagate():
     def boom(code, down):
         raise RuntimeError("falhou")
 
-    listeners.LinuxListener(boom).emit(30, True)  # não pode levantar
+    Quiet(boom).emit(30, True)  # não pode levantar
 
 
 def test_windows_event_logic():

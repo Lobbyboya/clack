@@ -142,6 +142,46 @@ def test_concurrent_keys_never_get_stuck(monkeypatch):
     assert stream.starts >= 25, f"o fluxo só religou {stream.starts} vezes"
 
 
+def test_windows_prefers_wasapi(monkeypatch):
+    monkeypatch.setattr(audio.sys, "platform", "win32")
+    monkeypatch.setattr(audio.sd, "query_hostapis", lambda: [
+        {"name": "MME", "default_output_device": 3},
+        {"name": "Windows WASAPI", "default_output_device": 7},
+    ])
+    opts = audio.output_options()
+    assert opts["device"] == 7
+    assert opts["extra_settings"]._streaminfo.flags & sd._lib.paWinWasapiAutoConvert  # auto_convert ligado
+
+
+def test_windows_without_wasapi_device(monkeypatch):
+    monkeypatch.setattr(audio.sys, "platform", "win32")
+    monkeypatch.setattr(audio.sd, "query_hostapis", lambda: [
+        {"name": "MME", "default_output_device": 3},
+        {"name": "Windows WASAPI", "default_output_device": -1},
+    ])
+    assert audio.output_options() == {}
+
+
+def test_other_systems_use_default_device(monkeypatch):
+    monkeypatch.setattr(audio.sys, "platform", "darwin")
+    assert audio.output_options() == {}
+
+
+def test_falls_back_when_preferred_device_fails(monkeypatch):
+    monkeypatch.setattr(audio, "output_options", lambda: {"device": 7})
+    opened = []
+
+    def factory(**kw):
+        if "device" in kw:
+            raise sd.PortAudioError("Invalid device")
+        opened.append(kw)
+        return FakeStream(**kw)
+
+    m = audio.Mixer(stream_factory=factory)
+    assert opened and opened[0]["blocksize"] == audio.BLOCKSIZE
+    assert isinstance(m._stream, FakeStream)
+
+
 def test_real_stream_sleeps_and_wakes(monkeypatch):
     """Com o PortAudio de verdade (pula se a máquina não tem saída de áudio)."""
     try:

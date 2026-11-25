@@ -1,84 +1,44 @@
-"""Lê os teclados pelo evdev (funciona no Wayland) e toca o som de cada tecla."""
+"""Daemon do Linux: lê os teclados pelo evdev (funciona no Wayland) e toca o som de cada tecla.
+
+O comando `clack` e o painel GTK conversam com ele por um socket Unix.
+"""
 
 import json
 import os
 import selectors
 import socket
-import time
 from pathlib import Path
-
-import evdev
-from evdev import ecodes
 
 from . import config
 from .audio import Mixer
+from .linux_input import LinuxListener
 from .packs import Pack, list_packs
 
 RUNTIME = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
 SOCKET_PATH = RUNTIME / "clack.sock"
-RESCAN_SECONDS = 2.0
 
 
-def load_config() -> dict:
-    return config.load()
-
-
-def save_config(cfg: dict):
-    config.save(cfg)
-
-
-def is_keyboard(dev: evdev.InputDevice) -> bool:
-    keys = dev.capabilities().get(ecodes.EV_KEY, [])
-    return ecodes.KEY_A in keys and ecodes.KEY_SPACE in keys
+def log(msg: str):
+    print(msg, flush=True)
 
 
 class Daemon:
     def __init__(self):
-        self.cfg = load_config()
+        self.cfg = config.load()
         self.mixer = Mixer()
         self.mixer.volume = self.cfg["volume"] / 100
         self.pack = Pack(self.cfg["pack"])
-        self.sel = selectors.DefaultSelector()
-        self.devices: dict[str, evdev.InputDevice] = {}
+        self.keyboard = LinuxListener(self.on_key, on_change=log)
 
-    # --- teclados ---------------------------------------------------------
-    def rescan(self):
-        for path in evdev.list_devices():
-            if path in self.devices:
-                continue
-            try:
-                dev = evdev.InputDevice(path)
-            except OSError:
-                continue
-            if is_keyboard(dev):
-                self.devices[path] = dev
-                self.sel.register(dev, selectors.EVENT_READ, self.on_key)
-                print(f"teclado: {dev.name} ({path})", flush=True)
-            else:
-                dev.close()
-
-    def drop(self, dev):
-        self.sel.unregister(dev)
-        self.devices.pop(dev.path, None)
-        print(f"teclado removido: {dev.name}", flush=True)
-
-    def on_key(self, dev):
-        try:
-            events = list(dev.read())
-        except OSError:
-            self.drop(dev)
-            return
+    def on_key(self, code: int, down: bool):
         if not self.cfg["enabled"]:
             return
-        for ev in events:
-            # value: 1 = apertou, 0 = soltou, 2 = repetição automática (ignorada)
-            if ev.type == ecodes.EV_KEY and ev.value in (0, 1):
-                sound = self.pack.sound_for(ev.code, "down" if ev.value else "up")
-                if sound:
-                    self.mixer.play(sound.pick())
+        sound = self.pack.sound_for(code, "down" if down else "up")
+        if sound:
+            self.mixer.play(sound.pick())
 
     # --- controle (comando clack) -----------------------------------------
-    def on_control(self, server):
+    def on_control(self, server: socket.socket):
         conn, _ = server.accept()
         with conn:
             try:
@@ -108,8 +68,8 @@ class Daemon:
         elif action != "status":
             return {"ok": False, "error": f"comando desconhecido: {action}"}
         if action != "status":
-            save_config(self.cfg)
-        return {"ok": True, **self.cfg, "teclados": [d.name for d in self.devices.values()]}
+            config.save(self.cfg)
+        return {"ok": True, **self.cfg, "teclados": self.keyboard.keyboards()}
 
     # --- laço principal ---------------------------------------------------
     def run(self):
@@ -117,26 +77,24 @@ class Daemon:
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(str(SOCKET_PATH))
         server.listen()
-        self.sel.register(server, selectors.EVENT_READ, self.on_control)
+        sel = selectors.DefaultSelector()
+        sel.register(server, selectors.EVENT_READ)
 
-        self.rescan()
-        if not self.devices:
-            print("nenhum teclado legível: você está no grupo 'input'? "
-                  "(depois do usermod é preciso sair e entrar na sessão)", flush=True)
+        self.keyboard.start()
+        self.keyboard.ready.wait(5)
+        if not self.keyboard.keyboards():
+            log("nenhum teclado legível: você está no grupo 'input'? "
+                "(depois do usermod é preciso sair e entrar na sessão)")
         self.mixer.start()
-        print(f"clack rodando, pacote {self.pack.title}, volume {self.cfg['volume']}", flush=True)
-
-        last_scan = time.monotonic()
+        log(f"clack rodando, pacote {self.pack.title}, volume {self.cfg['volume']}")
         try:
             while True:
-                for key, _ in self.sel.select(timeout=RESCAN_SECONDS):
-                    key.data(key.fileobj)
-                if time.monotonic() - last_scan >= RESCAN_SECONDS:
-                    self.rescan()
-                    last_scan = time.monotonic()
+                for _key, _ in sel.select():  # sem prazo: só acorda quando alguém fala com o daemon
+                    self.on_control(server)
         except KeyboardInterrupt:
             pass
         finally:
+            self.keyboard.stop()
             self.mixer.stop()
             server.close()
             SOCKET_PATH.unlink(missing_ok=True)
