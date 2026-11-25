@@ -1,3 +1,4 @@
 evdev>=1.6
-numpy>=1.26
+# sounddevice 0.5.6 ainda faz `array.shape = ...`, obsoleto no NumPy 2.5; trava antes da remoção.
+numpy>=1.26,<2.7
 sounddevice>=0.4.6

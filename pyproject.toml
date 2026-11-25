@@ -9,3 +9,7 @@ select = ["E", "F", "W", "B", "UP", "SIM", "I"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = [
+    # Vem de dentro do sounddevice 0.5.6 (ver requirements-*.txt), não do Clack.
+    "ignore:Setting the shape on a NumPy array:DeprecationWarning",
+]
